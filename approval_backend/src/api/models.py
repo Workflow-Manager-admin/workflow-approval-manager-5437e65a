@@ -90,9 +90,27 @@ class ApprovalWorkflowInstanceStep(Base):
     approval_workflow_instance_id = Column(Integer, ForeignKey("approval_workflow_instance.id"))
     approval_workflow_step_config_id = Column(Integer, ForeignKey("approval_workflow_step_config.id"))
     status = Column(Enum(StepStatusEnum), default=StepStatusEnum.PENDING)
-    approver = Column(String, nullable=False)  # user id or email
+    # Remove 'approver' field; use one-to-many with new approver table
     actioned_at = Column(DateTime(timezone=True), nullable=True)
     comments = Column(Text, nullable=True)
     instance = relationship("ApprovalWorkflowInstance", back_populates="steps")
+    approvers = relationship("ApprovalWorkflowInstanceStepApprover", back_populates="step", cascade="all, delete-orphan")
     # Do not include relationship to config for brevity
 
+
+class ApprovalWorkflowInstanceStepApprover(Base):
+    """
+    PUBLIC_INTERFACE
+
+    New model representing an approver (user) assigned to a specific instance step.
+    Tracks per-approver status/comments/actioned_at for "any" or "all" approval logic.
+    """
+    __tablename__ = "approval_workflow_instance_step_approver"
+    id = Column(Integer, primary_key=True, index=True)
+    instance_step_id = Column(Integer, ForeignKey("approval_workflow_instance_step.id"), nullable=False)
+    approver = Column(String, nullable=False)  # user id or email
+    status = Column(Enum(StepStatusEnum), default=StepStatusEnum.PENDING, nullable=False)
+    comments = Column(Text, nullable=True)
+    actioned_at = Column(DateTime(timezone=True), nullable=True)
+
+    step = relationship("ApprovalWorkflowInstanceStep", back_populates="approvers")
