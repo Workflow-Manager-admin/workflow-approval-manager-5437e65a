@@ -3,6 +3,7 @@ PUBLIC_INTERFACE
 
 This module integrates the python-business-rules library with the approval workflow system,
 allowing JSON-based business rules to be evaluated to drive conditional logic in workflow steps/blocks.
+Supports both AND ("all must approve") and OR ("any-one-can-approve") multi-approver logic using step config.
 """
 from business_rules.engine import run_all
 
