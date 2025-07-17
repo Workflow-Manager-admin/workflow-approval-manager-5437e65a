@@ -4,9 +4,10 @@ from typing import List, Optional
 
 from .db import get_db
 from . import schemas, crud, workflow_logic
+from .models import ApprovalWorkflowInstanceStepApprover, StepStatusEnum
+from sqlalchemy import select
 
 router = APIRouter()
-
 
 # --- ApprovalWorkflowConfig APIs ---
 @router.post("/workflow-configs/", response_model=schemas.ApprovalWorkflowConfigRead, tags=["Approval Workflow Config"])
@@ -84,7 +85,6 @@ async def delete_step_config(step_config_id: int, db: AsyncSession = Depends(get
     if count == 0:
         raise HTTPException(status_code=404, detail="Not found")
     return {"deleted": count}
-
 
 # --- ApprovalWorkflowBlock APIs ---
 @router.post("/blocks/", response_model=schemas.ApprovalWorkflowBlockRead, tags=["Approval Workflow Block"])
@@ -191,6 +191,113 @@ async def delete_instance_step(instance_step_id: int, db: AsyncSession = Depends
         raise HTTPException(status_code=404, detail="Not found")
     return {"deleted": count}
 
+# --- Per-Step Approver Assignment APIs (NEW) ---
+
+@router.post(
+    "/instance-step-approvers/",
+    response_model=schemas.ApprovalWorkflowInstanceStepApproverRead,
+    tags=["Approval Workflow Instance Step"],
+    summary="Assign an approver to a step.",
+    description="Assign a new approver to an existing workflow instance step."
+)
+# PUBLIC_INTERFACE
+async def create_step_approver_assignment(
+    obj: schemas.ApprovalWorkflowInstanceStepApproverCreate, 
+    db: AsyncSession = Depends(get_db)
+):
+    """Assign an approver (user/email) to a workflow instance step."""
+    stmt = select(ApprovalWorkflowInstanceStepApprover).where(
+        (ApprovalWorkflowInstanceStepApprover.instance_step_id == obj.instance_step_id) &
+        (ApprovalWorkflowInstanceStepApprover.approver == obj.approver)
+    )
+    existing = await db.execute(stmt)
+    existing_row = existing.scalar_one_or_none()
+    if existing_row:
+        raise HTTPException(status_code=400, detail="Approver already assigned to this step")
+    new_row = ApprovalWorkflowInstanceStepApprover(
+        instance_step_id=obj.instance_step_id,
+        approver=obj.approver,
+        status=StepStatusEnum.PENDING
+    )
+    db.add(new_row)
+    await db.commit()
+    await db.refresh(new_row)
+    return new_row
+
+@router.get(
+    "/instance-step-approvers/",
+    response_model=List[schemas.ApprovalWorkflowInstanceStepApproverRead],
+    tags=["Approval Workflow Instance Step"],
+    summary="List all approvers for an instance step.",
+    description="List all assigned approvers (with statuses) for a given step instance."
+)
+# PUBLIC_INTERFACE
+async def list_step_approver_assignments(
+    instance_step_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """List all approvers and their statuses for a workflow instance step."""
+    stmt = select(ApprovalWorkflowInstanceStepApprover).where(
+        ApprovalWorkflowInstanceStepApprover.instance_step_id == instance_step_id
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+@router.get(
+    "/instance-step-approvers/{approver_id}/",
+    response_model=schemas.ApprovalWorkflowInstanceStepApproverRead,
+    tags=["Approval Workflow Instance Step"],
+    summary="Get approver assignment details.",
+    description="Retrieve per-approver assignment object by primary key."
+)
+# PUBLIC_INTERFACE
+async def get_step_approver_assignment(
+    approver_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get an approver's assignment object by id."""
+    stmt = select(ApprovalWorkflowInstanceStepApprover).where(ApprovalWorkflowInstanceStepApprover.id == approver_id)
+    result = await db.execute(stmt)
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Approver assignment not found")
+    return row
+
+@router.put(
+    "/instance-step-approvers/{approver_id}/",
+    response_model=schemas.ApprovalWorkflowInstanceStepApproverRead,
+    tags=["Approval Workflow Instance Step"],
+    summary="Update an approver's status or comments for a step.",
+    description="Update a step assignment's approver status (approve, reject, skip, comment)."
+)
+# PUBLIC_INTERFACE
+async def update_step_approver_assignment(
+    approver_id: int,
+    obj: schemas.ApprovalWorkflowInstanceStepApproverUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Update an assignment's status or comments."""
+    stmt = select(ApprovalWorkflowInstanceStepApprover).where(ApprovalWorkflowInstanceStepApprover.id == approver_id)
+    result = await db.execute(stmt)
+    approver_row = result.scalar_one_or_none()
+    if not approver_row:
+        raise HTTPException(status_code=404, detail="Approver assignment not found")
+    changed = False
+    if obj.status:
+        approver_row.status = obj.status
+        changed = True
+    if obj.comments is not None:
+        approver_row.comments = obj.comments
+        changed = True
+    if obj.status in [StepStatusEnum.APPROVED, StepStatusEnum.REJECTED, StepStatusEnum.SKIPPED]:
+        from datetime import datetime as dt
+        approver_row.actioned_at = dt.utcnow()
+        changed = True
+    if changed:
+        await db.commit()
+        await db.refresh(approver_row)
+    return approver_row
+
 # --- Workflow Triggers ---
 @router.post("/instances/{instance_id}/start/", tags=["Workflow Execution"])
 # PUBLIC_INTERFACE
@@ -201,8 +308,12 @@ async def start_workflow(instance_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/instance-steps/{instance_step_id}/action/", tags=["Workflow Execution"])
 # PUBLIC_INTERFACE
-async def approve_or_reject_step(instance_step_id: int, action: str, comments: Optional[str]=None, db: AsyncSession = Depends(get_db)):
-    """Approve/reject/skip a workflow step."""
-    await workflow_logic.apply_approval(db, instance_step_id, action, comments=comments)
-    return {"updated": True}
+async def approve_or_reject_step(instance_step_id: int, action: str, comments: Optional[str]=None, approver_id: Optional[str]=None, db: AsyncSession = Depends(get_db)):
+    """
+    Approve/reject/skip a workflow step.
 
+    - `action`: 'APPROVE', 'REJECT', or 'SKIP'
+    - `approver_id`: optional, for multi-approver assignments
+    """
+    await workflow_logic.apply_approval(db, instance_step_id, action, comments=comments, approver_id=approver_id)
+    return {"updated": True}

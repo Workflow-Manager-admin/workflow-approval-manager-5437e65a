@@ -107,11 +107,41 @@ class ApprovalWorkflowInstanceRead(ApprovalWorkflowInstanceBase):
     class Config:
         from_attributes = True
 
+# --- Approver Assignments (NEW: support multiple approvers per step) ---
+
+# PUBLIC_INTERFACE
+class ApprovalWorkflowInstanceStepApproverBase(BaseModel):
+    """Base schema for per-step approver assignment."""
+    instance_step_id: int = Field(..., description="Associated ApprovalWorkflowInstanceStep id")
+    approver: str = Field(..., description="User ID or email of the approver")
+    status: StepStatusEnum = Field(default=StepStatusEnum.PENDING, description="Current status for this approver")
+    comments: Optional[str] = Field(default=None, description="Comments from this approver")
+    actioned_at: Optional[datetime] = Field(default=None, description="When this approver took action")
+
+# PUBLIC_INTERFACE
+class ApprovalWorkflowInstanceStepApproverCreate(BaseModel):
+    """Schema for creating a new assignment."""
+    instance_step_id: int = Field(..., description="Associated ApprovalWorkflowInstanceStep id")
+    approver: str = Field(..., description="User ID or email of the approver")
+
+# PUBLIC_INTERFACE
+class ApprovalWorkflowInstanceStepApproverUpdate(BaseModel):
+    """Schema for updating an assignment (status/comments)."""
+    status: Optional[StepStatusEnum]
+    comments: Optional[str] = None
+
+# PUBLIC_INTERFACE
+class ApprovalWorkflowInstanceStepApproverRead(ApprovalWorkflowInstanceStepApproverBase):
+    """Read schema reflecting db object."""
+    id: int
+
+    class Config:
+        from_attributes = True
+
 # PUBLIC_INTERFACE
 class ApprovalWorkflowInstanceStepBase(BaseModel):
     approval_workflow_instance_id: int
     approval_workflow_step_config_id: int
-    approver: str
     comments: Optional[str] = None
 
 # PUBLIC_INTERFACE
@@ -123,6 +153,8 @@ class ApprovalWorkflowInstanceStepRead(ApprovalWorkflowInstanceStepBase):
     id: int
     status: StepStatusEnum
     actioned_at: Optional[datetime] = None
+    # Add nested approvers
+    approvers: Optional[list[ApprovalWorkflowInstanceStepApproverRead]] = None
 
     class Config:
         from_attributes = True
